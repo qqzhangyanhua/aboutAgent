@@ -1,0 +1,4 @@
+openai>=1.0.0
+chromadb>=0.4.0
+networkx>=3.0
+python-louvain>=0.16
