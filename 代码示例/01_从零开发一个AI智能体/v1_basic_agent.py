@@ -6,10 +6,13 @@ import os
 from openai import OpenAI
 
 # ==================== 环境配置 ====================
-os.environ["OPENAI_API_KEY"] = "你的API Key"
-# 如果用 DeepSeek 等国产模型，取消下面的注释并修改
-# client = OpenAI(base_url="https://api.deepseek.com", api_key="你的Key")
-client = OpenAI(base_url="https://api.deepseek.com", api_key="sk-14aaf5be0bcc450e982573fff9ff5328")
+# 从环境变量读取API Key，使用前请先设置：
+# export DEEPSEEK_API_KEY="your_key_here"
+api_key = os.getenv("DEEPSEEK_API_KEY")
+if not api_key:
+    raise ValueError("请设置环境变量 DEEPSEEK_API_KEY")
+
+client = OpenAI(base_url="https://api.deepseek.com", api_key=api_key)
 MODEL_NAME = "deepseek-chat"  # 使用的模型名称
 
 # ==================== 工具函数（模拟真实API） ====================
@@ -156,11 +159,6 @@ def run_agent_v1(user_input: str):
         response = client.chat.completions.create(
             model=MODEL_NAME, messages=messages, tools=tools
         )
-
-        # 调试：打印响应类型和内容
-        print(f"DEBUG: response type = {type(response)}")
-        print(f"DEBUG: response = {response}")
-
         msg = response.choices[0].message
 
         if not msg.tool_calls:

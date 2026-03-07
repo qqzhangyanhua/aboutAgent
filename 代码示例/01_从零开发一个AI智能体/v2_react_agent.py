@@ -1,17 +1,19 @@
 """
-V3 反思版智能体：带自我审查和纠错的智能体
+V2 ReAct版智能体：带显式推理链的智能体
 """
 import json
 import os
 from openai import OpenAI
 
 # ==================== 环境配置 ====================
-os.environ["OPENAI_API_KEY"] = "你的API Key"
-# 如果用 DeepSeek 等国产模型，取消下面的注释并修改
-# client = OpenAI(base_url="https://api.deepseek.com", api_key="你的Key")
-client = OpenAI(base_url="https://api.deepseek.com", api_key="sk-14aaf5be0bcc450e982573fff9ff5328")
-MODEL_NAME = "deepseek-chat"  # 使用的模型名称
+# 从环境变量读取API Key，使用前请先设置：
+# export DEEPSEEK_API_KEY="your_key_here"
+api_key = os.getenv("DEEPSEEK_API_KEY")
+if not api_key:
+    raise ValueError("请设置环境变量 DEEPSEEK_API_KEY")
 
+client = OpenAI(base_url="https://api.deepseek.com", api_key=api_key)
+MODEL_NAME = "deepseek-chat"  # 使用的模型名称
 # ==================== 工具函数（模拟真实API） ====================
 
 def get_weather(city: str) -> str:
@@ -137,77 +139,37 @@ def execute_tool(tool_name: str, arguments: dict) -> str:
         return available_tools[tool_name](**arguments)
     return f"未知工具: {tool_name}"
 
-# ==================== V3 反思版智能体 ====================
+# ==================== V2 ReAct版智能体 ====================
 
-REACT_SYSTEM_PROMPT_V3 = """你是一个善于深度思考的AI助手，可以查天气、算数学、搜新闻、查汇率。
+REACT_SYSTEM_PROMPT = """你是一个善于思考的AI助手，可以查天气、算数学、搜新闻、查汇率。
 
-你必须严格按照 ReAct 模式工作：
-1. 每次回复先用【思考】说明推理过程
-2. 然后决定是调用工具还是回答
+你必须严格按照 ReAct 模式工作。在每次回复中，你要：
 
-注意：
-- 每轮必须有【思考】
-- 如果工具返回异常，在思考中说明调整策略
-- 最终回答前要有总结性思考
+1. 先用【思考】标签说明你的推理过程：当前掌握了什么信息、还缺什么、下一步打算做什么、为什么
+2. 然后再决定是调用工具还是直接回答
+
+格式示例：
+【思考】用户想知道北京和上海哪个更热。我需要分别查询两个城市的天气数据，然后比较温度。先查北京的天气。
+
+注意事项：
+- 每一轮都要有【思考】，不能跳过
+- 思考要体现逻辑推理，不是简单复述任务
+- 如果工具返回的结果有异常或不够用，要在思考中说明如何调整策略
+- 最终回答时也要先有一段总结性的【思考】，然后再给出结论
 """
 
-REFLECTION_PROMPT = """请你以"严格质检员"的身份，审视以下AI助手的回答。
-
-用户的原始问题是：
-{user_input}
-
-AI助手的回答是：
-{agent_answer}
-
-请从以下维度检查，并输出审查报告：
-
-1.【完整性】用户问了几个问题/子任务？是否每个都回答了？有没有遗漏？
-2.【准确性】数据和计算是否正确？有没有张冠李戴或数字错误？
-3.【逻辑性】推理过程是否合理？结论是否从证据中自然得出？有没有逻辑跳跃？
-4.【实用性】给出的建议是否切实可行？有没有空话套话？
-5.【潜在风险】有没有需要提醒用户但被忽略的重要信息？
-
-最后给出：
-- 综合评分：A（优秀）/ B（良好，有小瑕疵）/ C（及格，有明显遗漏）/ D（不及格，需要重做）
-- 如果评分是 C 或 D，请明确指出需要补充或修正的内容
-"""
-
-REVISION_PROMPT = """你之前对用户的问题给出了一个回答，但质检发现了一些问题。
-
-用户原始问题：
-{user_input}
-
-你之前的回答：
-{agent_answer}
-
-质检报告：
-{reflection}
-
-请根据质检报告的反馈，修正和完善你的回答。要求：
-- 保留原回答中正确的部分
-- 补充遗漏的内容
-- 修正错误的数据或逻辑
-- 输出一个更完整、更准确的最终回答
-"""
-
-def run_agent_v3(user_input: str):
-    """V3 反思版：带自我审查和纠错的智能体"""
+def run_agent_v2(user_input: str):
+    """V2 ReAct版：带显式推理链的智能体"""
     print(f"\n{'='*60}")
-    print(f"  V3 反思版智能体")
+    print(f"  V2 ReAct 版智能体")
     print(f"  用户: {user_input}")
     print(f"{'='*60}")
 
-    # ===== 阶段一：ReAct 执行，收集信息并生成初版回答 =====
-    print(f"\n{'─'*40}")
-    print("📝 阶段一：执行任务，生成初版回答")
-    print(f"{'─'*40}")
-
     messages = [
-        {"role": "system", "content": REACT_SYSTEM_PROMPT_V3},
+        {"role": "system", "content": REACT_SYSTEM_PROMPT},
         {"role": "user", "content": user_input}
     ]
 
-    agent_answer = ""
     for i in range(10):
         print(f"\n--- 第 {i+1} 轮 ---")
         response = client.chat.completions.create(
@@ -215,12 +177,13 @@ def run_agent_v3(user_input: str):
         )
         msg = response.choices[0].message
 
+        # 打印大模型的思考过程（ReAct的核心价值）
         if msg.content:
             print(f"\n💭 {msg.content}")
 
         if not msg.tool_calls:
-            agent_answer = msg.content
-            break
+            print(f"\n✅ 最终回答已包含在上方思考中")
+            return msg.content
 
         messages.append(msg)
         for tool_call in msg.tool_calls:
@@ -235,60 +198,10 @@ def run_agent_v3(user_input: str):
                 "content": result
             })
 
-    if not agent_answer:
-        return "执行阶段未能生成回答"
-
-    # ===== 阶段二：反思，对初版回答进行自我审查 =====
-    print(f"\n{'─'*40}")
-    print("🔍 阶段二：自我反思，审查初版回答")
-    print(f"{'─'*40}")
-
-    reflection_response = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[{
-            "role": "user",
-            "content": REFLECTION_PROMPT.format(
-                user_input=user_input,
-                agent_answer=agent_answer
-            )
-        }]
-    )
-    reflection = reflection_response.choices[0].message.content
-    print(f"\n🔍 质检报告:\n{reflection}")
-
-    # ===== 阶段三：如果质检不通过，修正回答 =====
-    needs_revision = any(grade in reflection for grade in ["评分：C", "评分：D", "评分: C", "评分: D"])
-
-    if needs_revision:
-        print(f"\n{'─'*40}")
-        print("🔄 阶段三：修正回答")
-        print(f"{'─'*40}")
-
-        revision_response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=[{
-                "role": "user",
-                "content": REVISION_PROMPT.format(
-                    user_input=user_input,
-                    agent_answer=agent_answer,
-                    reflection=reflection
-                )
-            }]
-        )
-        final_answer = revision_response.choices[0].message.content
-        print(f"\n✅ 修正后的最终回答:\n{final_answer}")
-        return final_answer
-    else:
-        print(f"\n✅ 质检通过！初版回答质量合格，无需修正。")
-        return agent_answer
+    return "达到最大轮次"
 
 # ==================== 测试代码 ====================
 
 if __name__ == "__main__":
-    # 测试案例：复杂的出行规划任务
-    run_agent_v3(
-        "帮我做个出行规划：我从北京出发，想去一个天气好的城市玩两天。"
-        "帮我对比一下上海、广州、杭州的天气，推荐一个最合适的目的地。"
-        "另外查一下AI相关的新闻，我想在路上看看。"
-        "最后算一下如果高铁票800元、酒店每晚350元、吃饭每天200元，两天总共要花多少钱。"
-    )
+    # 测试案例：复杂多步骤任务
+    run_agent_v2("我下周要去广州出差3天，帮我查一下广州天气，再查查有没有什么新闻值得关注，最后算一下如果我带500美元能换多少人民币")
