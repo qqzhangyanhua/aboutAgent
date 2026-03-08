@@ -37,15 +37,55 @@ client = OpenAI()
 chroma_client = chromadb.Client()
 
 def get_embedding(text):
-    response = client.embeddings.create(model="text-embedding-3-small", input=text)
-    return response.data[0].embedding
+    """获取文本的向量表示
+
+    Args:
+        text: 输入文本
+
+    Returns:
+        向量列表
+
+    Raises:
+        ValueError: 如果text为空
+        RuntimeError: 如果API调用失败
+    """
+    if not text or not text.strip():
+        raise ValueError("文本不能为空")
+
+    try:
+        response = client.embeddings.create(
+            model="text-embedding-3-small",
+            input=text
+        )
+        return response.data[0].embedding
+    except Exception as e:
+        raise RuntimeError(f"Embedding生成失败: {e}")
 
 def ask_llm(prompt, model="gpt-4o-mini"):
-    response = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}]
-    )
-    return response.choices[0].message.content
+    """调用大模型生成回答
+
+    Args:
+        prompt: 提示词
+        model: 模型名称
+
+    Returns:
+        模型生成的文本
+
+    Raises:
+        ValueError: 如果prompt为空
+        RuntimeError: 如果API调用失败
+    """
+    if not prompt or not prompt.strip():
+        raise ValueError("提示词不能为空")
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        raise RuntimeError(f"LLM调用失败: {e}")
 ```
 
 ---
@@ -134,48 +174,58 @@ for i, c in enumerate(small_chunks):
 ```python
 import re
 
-def smart_chunk(text, max_size=300, overlap=50):
-    """按自然段落边界切块，保留语义完整性"""
-    # 按标题和空行分段
-    sections = re.split(r'\n(?=[\u4e00-\u9fff]、|[一二三四五六七八九十]+、|\d+\.)', text)
+def smart_chunk(text, max_size=300):
+    """按自然边界切块，保留语义完整性
+
+    策略：
+    1. 优先按段落（双换行）切分
+    2. 段落过大时按句子切分（支持中英文）
+    3. 句子过大时强制切分
+
+    Args:
+        text: 待切分的文本
+        max_size: 单个块的最大字符数
+
+    Returns:
+        切分后的文本块列表
+    """
+    if not text or not text.strip():
+        return []
+
+    # 第一步：按段落切分（双换行或标题）
+    # 支持中文标题（一、二、1. 2.）和英文标题（# ## 1. 2.）
+    paragraphs = re.split(r'\n\s*\n|(?=\n[一二三四五六七八九十]+、)|(?=\n\d+\.)', text)
+    paragraphs = [p.strip() for p in paragraphs if p.strip()]
 
     chunks = []
-    current_chunk = ""
-
-    for section in sections:
-        section = section.strip()
-        if not section:
-            continue
-
-        if len(current_chunk) + len(section) <= max_size:
-            current_chunk += "\n" + section if current_chunk else section
+    for para in paragraphs:
+        if len(para) <= max_size:
+            chunks.append(para)
         else:
-            if current_chunk:
-                chunks.append(current_chunk)
-            current_chunk = section
+            # 第二步：按句子切分（支持中英文标点）
+            sentences = re.split(r'([。.!?！？\n])', para)
+            # 重新组合句子和标点
+            sentences = [''.join(sentences[i:i+2]) for i in range(0, len(sentences)-1, 2)]
 
-    if current_chunk:
-        chunks.append(current_chunk)
-
-    # 如果某个块仍然太大，按句号切分
-    final_chunks = []
-    for chunk in chunks:
-        if len(chunk) > max_size:
-            sentences = chunk.split("。")
-            sub_chunk = ""
+            current = ""
             for sent in sentences:
-                if len(sub_chunk) + len(sent) <= max_size:
-                    sub_chunk += sent + "。"
+                if not sent.strip():
+                    continue
+                if len(current) + len(sent) <= max_size:
+                    current += sent
                 else:
-                    if sub_chunk:
-                        final_chunks.append(sub_chunk.strip())
-                    sub_chunk = sent + "。"
-            if sub_chunk:
-                final_chunks.append(sub_chunk.strip())
-        else:
-            final_chunks.append(chunk)
+                    if current:
+                        chunks.append(current.strip())
+                    # 第三步：如果单个句子超长，强制切分
+                    if len(sent) > max_size:
+                        for i in range(0, len(sent), max_size):
+                            chunks.append(sent[i:i+max_size].strip())
+                    else:
+                        current = sent
+            if current:
+                chunks.append(current.strip())
 
-    return final_chunks
+    return [c for c in chunks if c]  # 过滤空块
 
 smart_chunks = smart_chunk(test_doc, max_size=200)
 print(f"语义切法：切成 {len(smart_chunks)} 块")
@@ -206,7 +256,19 @@ for i, c in enumerate(smart_chunks):
 
 每一块都是一个完整的语义单元——年假归年假，病假归病假，不会从中间劈开。
 
-我自己的经验：中文文档 chunk_size 在 200-500 字之间比较合适，overlap 给 50-100 字。太大了答案会被一堆无关内容淹没，太小了上下文断裂。具体多少得看你的文档结构，多试几次就有感觉了。
+### 何时需要语义分块？
+
+✅ **需要：**
+- 文档有明确的章节结构（标题、段落）
+- 用户查询针对特定主题（如"年假规定"）
+- 固定切分导致答案不完整或包含无关信息
+
+❌ **不需要：**
+- 文档是纯文本流（如小说、日志）
+- 文档很短（少于1000字）
+- 固定切分已经足够准确
+
+**经验值：** 中文文档 chunk_size 在 200-500 字之间比较合适。太大了答案会被一堆无关内容淹没，太小了上下文断裂。具体多少得看你的文档结构，多试几次就有感觉了。
 
 ---
 
@@ -271,8 +333,24 @@ local_model = SentenceTransformer("BAAI/bge-large-zh-v1.5")
 
 def get_local_embedding(text):
     """用本地 BGE 模型做向量化——免费、快、中文效果好"""
+    if not text or not text.strip():
+        raise ValueError("文本不能为空")
     return local_model.encode(text, normalize_embeddings=True).tolist()
 ```
+
+### 何时需要更换Embedding模型？
+
+✅ **需要：**
+- 文档全是中文，但用的是英文模型（如老版text-embedding-ada-002）
+- 相关文档的相似度分数都挤在0.3-0.5之间，区分度差
+- 搜索"请假"却返回"加班"相关内容（语义理解错误）
+
+❌ **不需要：**
+- 当前模型的检索准确率已经超过80%
+- 文档量很小（少于100篇），模型差异不明显
+- 成本敏感且OpenAI模型已经够用
+
+**经验值：** 先用OpenAI的`text-embedding-3-small`快速验证，如果效果不好或成本太高，再换BGE等开源模型。
 
 ---
 
@@ -331,17 +409,49 @@ from rank_bm25 import BM25Okapi
 import jieba
 
 class HybridSearch:
-    """混合检索：BM25 关键词检索 + 向量语义检索"""
+    """混合检索：BM25 关键词检索 + 向量语义检索
 
-    def __init__(self, name="hybrid"):
-        self.collection = chroma_client.create_collection(name=name, metadata={"hnsw:space": "cosine"})
-        self.docs = []
-        self.bm25 = None
+    设计原则：
+    1. 数据只存一份（在ChromaDB里）
+    2. BM25索引按需构建
+    3. 权重在初始化时固定
+    """
+
+    def __init__(self, name="hybrid", bm25_weight=0.4):
+        """初始化混合检索
+
+        Args:
+            name: 集合名称
+            bm25_weight: BM25权重（0-1之间），向量权重自动为1-bm25_weight
+        """
+        self.collection = chroma_client.create_collection(
+            name=name,
+            metadata={"hnsw:space": "cosine"}
+        )
+        self.bm25_weight = bm25_weight
+        self.vector_weight = 1 - bm25_weight
+        self._docs = []
+        self._bm25_index = None
 
     def add_documents(self, documents):
-        self.docs = documents
+        """添加文档并构建索引
+
+        Args:
+            documents: 文档列表
+
+        Raises:
+            ValueError: 如果documents为空
+        """
+        if not documents:
+            raise ValueError("文档列表不能为空")
+
+        self._docs = documents
+
+        # 构建BM25索引
         tokenized = [list(jieba.cut(doc)) for doc in documents]
-        self.bm25 = BM25Okapi(tokenized)
+        self._bm25_index = BM25Okapi(tokenized)
+
+        # 存入向量数据库
         for i, doc in enumerate(documents):
             self.collection.add(
                 ids=[f"doc_{i}"],
@@ -349,10 +459,25 @@ class HybridSearch:
                 documents=[doc]
             )
 
-    def search(self, query, top_k=3, bm25_weight=0.5, vector_weight=0.5):
+    def search(self, query, top_k=3):
+        """混合检索
+
+        Args:
+            query: 查询文本
+            top_k: 返回结果数量
+
+        Returns:
+            [(文档, 分数), ...] 按分数降序排列
+
+        Raises:
+            RuntimeError: 如果未添加文档
+        """
+        if self._bm25_index is None:
+            raise RuntimeError("请先调用add_documents添加文档")
+
         # BM25 检索
         tokenized_query = list(jieba.cut(query))
-        bm25_scores = self.bm25.get_scores(tokenized_query)
+        bm25_scores = self._bm25_index.get_scores(tokenized_query)
 
         # 归一化 BM25 分数到 0-1
         max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1
@@ -361,20 +486,20 @@ class HybridSearch:
         # 向量检索
         results = self.collection.query(
             query_embeddings=[get_embedding(query)],
-            n_results=len(self.docs),
+            n_results=len(self._docs),
             include=["distances"]
         )
         vector_scores = [1 - d for d in results["distances"][0]]
 
         # 混合打分（加权求和）
         hybrid_scores = []
-        for i in range(len(self.docs)):
-            score = bm25_weight * bm25_normalized[i] + vector_weight * vector_scores[i]
+        for i in range(len(self._docs)):
+            score = (self.bm25_weight * bm25_normalized[i] +
+                    self.vector_weight * vector_scores[i])
             hybrid_scores.append((i, score))
 
         hybrid_scores.sort(key=lambda x: x[1], reverse=True)
-        return [(self.docs[idx], score) for idx, score in hybrid_scores[:top_k]]
-
+        return [(self._docs[idx], score) for idx, score in hybrid_scores[:top_k]]
 
 # 对比效果
 docs = [
@@ -419,7 +544,19 @@ for i, (doc, score) in enumerate(hybrid_results):
 
 BM25 一上，"A7-Pro"精确匹配直接把分数拉满，正确结果一下子回到第一位。
 
-我的建议：如果你的文档里有大量专有名词、产品编号、人名、精确数字，混合检索是必须上的。权重方面我一般从 BM25 : 向量 = 0.4 : 0.6 开始试，然后根据实际效果调。
+### 何时需要混合检索？
+
+✅ **需要：**
+- 文档包含大量产品编号、人名、专有名词、精确数字
+- 用户查询经常包含精确的关键词（如"A7-Pro"、"5天年假"）
+- 纯向量检索的准确率低于70%，经常找不到包含关键词的文档
+
+❌ **不需要：**
+- 文档少于100篇，向量检索已经足够准确
+- 查询都是自然语言问题（如"怎么请假"），很少包含精确关键词
+- 文档中没有需要精确匹配的专有名词
+
+**经验值：** 权重方面我一般从 BM25 : 向量 = 0.4 : 0.6 开始试，然后根据实际效果调。如果关键词匹配很重要，可以提高BM25权重到0.5-0.6。
 
 ---
 
@@ -509,6 +646,20 @@ good_prompt_demo()
 2. **锁死信息源** — "只基于参考资料"，别用你自己的知识
 3. **堵死编造的路** — "资料里没有就说没有"，这条最关键
 4. **约束格式** — "数字必须原文引用"，不然它会给你来个"大约500元"
+
+### 何时需要严格约束Prompt？
+
+✅ **需要：**
+- RAG系统用于企业知识库、法律文档、医疗咨询等严肃场景
+- 大模型经常"补充"参考资料中没有的信息
+- 用户需要可追溯的答案来源，不能接受任何编造
+
+❌ **不需要：**
+- 用于创意写作、头脑风暴等场景，需要大模型发挥想象力
+- 参考资料只是辅助，允许大模型结合自身知识回答
+- 文档覆盖率很高（>90%），大模型很少需要说"不知道"
+
+**经验值：** 企业级RAG系统必须严格约束Prompt，个人学习助手可以放宽。关键是在"准确性"和"有用性"之间找平衡。
 
 ---
 
@@ -626,6 +777,21 @@ conflict_fix_demo()
 1. **给每段文档打上元数据标签**（版本号、日期、状态），不再喂裸文本
 2. **在 Prompt 里写明冲突处理规则**，告诉它版本冲突了听谁的
 
+### 何时需要元数据管理？
+
+✅ **需要：**
+- 文档有多个版本，存在新旧信息冲突
+- 不同部门有补充规定，需要组合多个文档的信息
+- 需要标注答案来源，方便用户追溯和验证
+- 文档会定期更新，旧版本不能立即删除（过渡期）
+
+❌ **不需要：**
+- 文档都是最新版本，没有历史版本冲突
+- 文档量很小（少于50篇），手动管理即可
+- 不需要追溯答案来源，只要答案正确就行
+
+**经验值：** 如果你的知识库会持续更新（如企业制度、产品文档），从一开始就加上元数据管理，否则后期补救成本很高。元数据至少包含：来源、版本、日期、状态。
+
 > **正文配图 4 提示词：**
 > An illustration showing document version conflict resolution. Left side: two overlapping document icons, one old (faded, with "v2.0" and a red "deprecated" stamp) and one new (vibrant, with "v3.0" and a green "active" checkmark). Arrows from both pointing to a central AI brain icon. The brain has a clear arrow pointing to the new document, showing it chose the current version. Right side: a clean answer output with source citations. Flat design, white background, blue and green tones. No text. Aspect ratio 16:9.
 
@@ -657,30 +823,70 @@ conflict_fix_demo()
 import re
 import jieba
 from rank_bm25 import BM25Okapi
+from datetime import datetime
 
 class ProductionRAG:
-    """生产级 RAG：集成五大修复方案"""
+    """生产级 RAG：集成五大修复方案
 
-    def __init__(self):
+    特性：
+    1. 语义分块（坑一）
+    2. 支持自定义Embedding模型（坑二）
+    3. 混合检索 BM25+向量（坑三）
+    4. 严格约束Prompt（坑四）
+    5. 元数据管理（坑五）
+    """
+
+    def __init__(self, bm25_weight=0.4):
+        """初始化RAG系统
+
+        Args:
+            bm25_weight: BM25权重（0-1之间）
+        """
         self.collection = chroma_client.create_collection(
             name="production_rag",
             metadata={"hnsw:space": "cosine"}
         )
+        self.bm25_weight = bm25_weight
+        self.vector_weight = 1 - bm25_weight
         self.chunks = []
         self.chunk_metas = []
-        self.bm25 = None
+        self._bm25_index = None
 
-    def add_document(self, content, source, version, date, status="现行有效"):
-        """添加文档：语义分块 + 元数据"""
+    def add_document(self, content, metadata=None):
+        """添加文档：语义分块 + 元数据
+
+        Args:
+            content: 文档内容
+            metadata: 可选的元数据字典，包含：
+                - source: 来源（默认"未知"）
+                - version: 版本（默认"v1.0"）
+                - date: 日期（默认当前日期）
+                - status: 状态（默认"现行有效"）
+
+        Raises:
+            ValueError: 如果content为空
+        """
+        if not content or not content.strip():
+            raise ValueError("文档内容不能为空")
+
+        # 向后兼容：如果没有提供元数据，使用默认值
+        if metadata is None:
+            metadata = {}
+
+        default_meta = {
+            "source": "未知",
+            "version": "v1.0",
+            "date": datetime.now().strftime("%Y-%m-%d"),
+            "status": "现行有效"
+        }
+        # 合并用户提供的元数据和默认值
+        meta = {**default_meta, **metadata}
+
+        # 语义分块
         chunks = smart_chunk(content, max_size=300)
+
         for i, chunk in enumerate(chunks):
-            chunk_id = f"{source}_{version}_{i}"
-            meta = {
-                "source": source,
-                "version": version,
-                "date": date,
-                "status": status
-            }
+            chunk_id = f"{meta['source']}_{meta['version']}_{i}_{len(self.chunks)}"
             embedding = get_embedding(chunk)
             self.collection.add(
                 ids=[chunk_id],
@@ -693,13 +899,27 @@ class ProductionRAG:
 
         # 重建 BM25 索引
         tokenized = [list(jieba.cut(c)) for c in self.chunks]
-        self.bm25 = BM25Okapi(tokenized)
-        print(f"  ✅ 已添加：{source} {version}（{len(chunks)} 块）")
+        self._bm25_index = BM25Okapi(tokenized)
+        print(f"  ✅ 已添加：{meta['source']} {meta['version']}（{len(chunks)} 块）")
 
-    def hybrid_search(self, query, top_k=5, bm25_weight=0.4, vector_weight=0.6):
-        """混合检索：BM25 + 向量"""
+    def hybrid_search(self, query, top_k=5):
+        """混合检索：BM25 + 向量
+
+        Args:
+            query: 查询文本
+            top_k: 返回结果数量
+
+        Returns:
+            [(chunk, metadata, score), ...]
+
+        Raises:
+            RuntimeError: 如果未添加文档
+        """
+        if self._bm25_index is None:
+            raise RuntimeError("请先调用add_document添加文档")
+
         # BM25
-        bm25_scores = self.bm25.get_scores(list(jieba.cut(query)))
+        bm25_scores = self._bm25_index.get_scores(list(jieba.cut(query)))
         max_bm25 = max(bm25_scores) if max(bm25_scores) > 0 else 1
         bm25_norm = [s / max_bm25 for s in bm25_scores]
 
@@ -714,14 +934,29 @@ class ProductionRAG:
         # 混合打分
         scored = []
         for i in range(len(self.chunks)):
-            score = bm25_weight * bm25_norm[i] + vector_weight * vector_scores[i]
+            score = (self.bm25_weight * bm25_norm[i] +
+                    self.vector_weight * vector_scores[i])
             scored.append((i, score))
         scored.sort(key=lambda x: x[1], reverse=True)
 
-        return [(self.chunks[i], self.chunk_metas[i], s) for i, s in scored[:top_k]]
+        return [(self.chunks[i], self.chunk_metas[i], s)
+                for i, s in scored[:top_k]]
 
     def query(self, question):
-        """完整的 RAG 问答"""
+        """完整的 RAG 问答
+
+        Args:
+            question: 用户问题
+
+        Returns:
+            大模型生成的答案
+
+        Raises:
+            ValueError: 如果question为空
+        """
+        if not question or not question.strip():
+            raise ValueError("问题不能为空")
+
         print(f"\n{'='*50}")
         print(f"  问题: {question}")
         print(f"{'='*50}")
@@ -731,7 +966,7 @@ class ProductionRAG:
         print(f"\n📚 检索到 {len(results)} 段：")
         context_parts = []
         for i, (chunk, meta, score) in enumerate(results):
-            status_tag = f"⚠️已废止" if meta["status"] == "已废止" else "✅现行"
+            status_tag = "⚠️已废止" if meta["status"] == "已废止" else "✅现行"
             print(f"  [{i+1}] {status_tag} {meta['source']} {meta['version']} (分数{score:.2f})")
             meta_line = f"[{meta['source']} {meta['version']} | {meta['date']} | {meta['status']}]"
             context_parts.append(f"{meta_line}\n{chunk}")
@@ -760,22 +995,65 @@ class ProductionRAG:
 # 使用示例
 rag = ProductionRAG()
 
+# 方式1：简单使用（向后兼容旧代码）
 rag.add_document(
-    content="年假：入职满一年享有5天。病假工资按70%发放。事假无薪。",
-    source="员工手册", version="v2.0", date="2022-01-01", status="已废止"
+    content="年假：入职满一年享有5天。病假工资按70%发放。事假无薪。"
 )
+
+# 方式2：带完整元数据（推荐）
 rag.add_document(
     content="年假：入职满一年享有7天（2024年起上调）。病假工资按80%发放。事假无薪，每次不超过3天。",
-    source="员工手册", version="v3.0", date="2024-01-01", status="现行有效"
+    metadata={
+        "source": "员工手册",
+        "version": "v3.0",
+        "date": "2024-01-01",
+        "status": "现行有效"
+    }
 )
+
 rag.add_document(
     content="差旅报销：一线城市住宿每晚不超过500元，其他城市350元。餐补每天100元。报销需在出差结束后5个工作日内提交。",
-    source="报销制度", version="v1.0", date="2024-06-01", status="现行有效"
+    metadata={
+        "source": "报销制度",
+        "version": "v1.0",
+        "date": "2024-06-01",
+        "status": "现行有效"
+    }
 )
 
 rag.query("年假有几天？病假工资打几折？")
 rag.query("出差住酒店的报销上限是多少？")
 ```
+
+### 何时需要生产级RAG？
+
+这个完整的`ProductionRAG`集成了五大修复方案，但不是所有场景都需要：
+
+✅ **需要完整方案：**
+- 企业知识库、法律文档、医疗咨询等严肃场景
+- 文档超过100篇，包含多个版本和来源
+- 用户查询包含精确关键词和自然语言混合
+- 需要可追溯的答案来源和高准确率（>90%）
+
+✅ **只需要部分方案：**
+- 文档50-100篇：语义分块 + 向量检索即可
+- 文档无版本冲突：不需要元数据管理
+- 查询都是自然语言：不需要BM25混合检索
+- 个人学习助手：可以放宽Prompt约束
+
+❌ **不需要（用基础RAG）：**
+- 文档少于50篇，结构简单
+- 只是做原型验证，不是生产系统
+- 向量检索准确率已经超过80%
+
+**渐进式升级路径：**
+1. 第一步：基础RAG（向量检索 + 简单Prompt）
+2. 第二步：加语义分块（如果答案经常不完整）
+3. 第三步：加混合检索（如果关键词搜不准）
+4. 第四步：严格Prompt（如果大模型爱编造）
+5. 第五步：元数据管理（如果有版本冲突）
+
+不要一上来就全上，根据实际问题逐步优化。
 
 ---
 
@@ -784,6 +1062,25 @@ rag.query("出差住酒店的报销上限是多少？")
 踩过这五个坑的人应该都有同感——RAG 搭起来容易，调好真不容易。分块影响信息粒度，Embedding 影响语义理解，检索策略影响查全率，Prompt 影响可信度，文档管理影响实际可用性。哪个环节拉胯了，最终效果都会打折。
 
 我自己的体会是：**RAG 的效果，八成取决于检索质量，大模型的能力其实只占两成**。与其花钱换更贵的模型，不如先把检索这一环做扎实。
+
+**关键原则：**
+1. **不要过度优化** — 根据实际问题逐步改进，不要一上来就全上
+2. **先测后优** — 每个优化都要有量化指标（准确率、召回率）
+3. **向后兼容** — 新方案要兼容旧代码，降低升级成本
+4. **错误处理** — 生产代码必须处理API失败、空输入等边界情况
+
+**渐进式优化路径：**
+```
+基础RAG（50行代码）
+  ↓ 答案不完整？
+加语义分块（坑一）
+  ↓ 关键词搜不准？
+加混合检索（坑三）
+  ↓ 大模型爱编造？
+严格Prompt（坑四）
+  ↓ 有版本冲突？
+元数据管理（坑五）
+```
 
 上篇搭了 RAG 的骨架，这篇把最常见的坑填了。下一篇来点更有意思的——让智能体**自己决定什么时候该查资料、查哪个知识库、查完觉得不对再换个方式查**。这就是 Agentic RAG，也是这个系列的收官篇。
 
